@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{quote, format_ident};
-use syn::{parse_macro_input, DeriveInput, Data, parse_quote};
+use syn::{parse_macro_input, DeriveInput, Data, parse_quote, Field};
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -40,6 +40,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         
     });
 
+    let builder_build_body = fields.iter().map(|field| {
+        let ident = &field.ident;
+
+        let err_msg = format!("missing field '{}'", ident.as_ref().unwrap());
+
+        quote! {
+            let #ident = self.#ident.ok_or(#err_msg)?;
+        }
+    });
+
+    let field_names = fields.iter().map(|field| field.ident.as_ref());
+
     let struct_name = input.ident;
     let expanded = quote! {
         impl #struct_name {
@@ -55,6 +67,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #builder_name {
             #(#builder_setters)*
+
+            pub fn build(self) -> core::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
+                #(#builder_build_body)*
+                Ok(#struct_name {
+                    #(#field_names),*
+                })
+            }
         }
     };
     let res = TokenStream::from(expanded);
