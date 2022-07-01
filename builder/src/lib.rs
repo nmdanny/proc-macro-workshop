@@ -1,8 +1,6 @@
-use std::any::{Any, TypeId};
-
 use proc_macro::TokenStream;
 use quote::{quote, format_ident};
-use syn::{parse_macro_input, DeriveInput, Data, Type, TypePath, QSelf, parse_quote};
+use syn::{parse_macro_input, DeriveInput, Data, parse_quote};
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -15,7 +13,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         _ => panic!("Expected struct")
     };
 
-    let builder_args = fields.iter().map(|field| {
+    let builder_fields = fields.iter().map(|field| {
         let mut new_field = field.clone();
         let ty = new_field.ty;
         new_field.ty = parse_quote! {
@@ -24,22 +22,39 @@ pub fn derive(input: TokenStream) -> TokenStream {
         new_field
     }).collect::<Vec<_>>();
 
-    let builder_nones = fields.iter().map(|field| {
+    let builder_init_nones = fields.iter().map(|field| {
         let ident = &field.ident;
         quote! { #ident: None }
+    });
+
+    let builder_setters = fields.iter().map(|field| {
+        let ident = &field.ident;
+        let ty = &field.ty;
+
+        quote! {
+            pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                self.#ident = Some(#ident);
+                self
+            }
+        }
+        
     });
 
     let struct_name = input.ident;
     let expanded = quote! {
         impl #struct_name {
-            pub fn builder() {
+            pub fn builder() -> #builder_name {
                 #builder_name {
-                    #(#builder_nones),*
+                    #(#builder_init_nones),*
                 }
             }
         }
         pub struct #builder_name {
-            #(#builder_args),*
+            #(#builder_fields),*
+        }
+
+        impl #builder_name {
+            #(#builder_setters)*
         }
     };
     let res = TokenStream::from(expanded);
