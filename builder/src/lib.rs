@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{quote, format_ident, ToTokens};
-use syn::{parse_macro_input, DeriveInput, Data, parse_quote, Field, Type, Path, TypePath, Ident};
+use syn::{parse_macro_input, DeriveInput, Data, parse_quote, Field, Type, Path, TypePath, Ident, AngleBracketedGenericArguments, GenericArgument};
 
 
 struct BuilderField<'f> {
@@ -21,6 +21,10 @@ impl <'f> BuilderField<'f> {
     }
 
     fn is_option(&self) -> bool {
+        self.option_of().is_some()
+    }
+
+    fn option_of(&self) -> Option<&syn::Type> {
         let ty = &self.field.ty;
         match ty {
             Type::Path(TypePath {
@@ -30,18 +34,35 @@ impl <'f> BuilderField<'f> {
                     ..
                 }
             }) => {
-                segments.iter()
-                    .next()
-                    .map(|s| s.ident.to_string())
-                    == Some("Option".into())
+                let first_segment = segments.first()?;
+                (first_segment.ident.to_string() == "Option").then_some(())?;
+                match &first_segment.arguments {
+                    syn::PathArguments::AngleBracketed(
+                        AngleBracketedGenericArguments {
+                            args,
+                            ..
+                        }
+                    ) => {
+                        let first_arg = args.first().expect("Option should have one type argument");
+                        if let GenericArgument::Type(ty) = first_arg {
+                            return Some(ty);
+                        }
+                    }
+                    _ => panic!("Expected option to be angle bracketed")
+                }
+
             },
-            _ => false,
+            _ => return None,
         }
+        None
     }
 
 
     fn to_field(&self) -> Field {
         let mut new_field = self.field.clone();
+        if self.is_option() {
+            return new_field
+        }
         let ty = self.ty();
         new_field.ty = parse_quote! {
             core::option::Option<#ty>
@@ -53,12 +74,22 @@ impl <'f> BuilderField<'f> {
         let ident = self.ident();
         let ty = self.ty();
 
-        quote! {
-            pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                self.#ident = Some(#ident);
-                self
+        if let Some(underlying_ty) = self.option_of() {
+            quote ! {
+                pub fn #ident(&mut self, #ident: #underlying_ty) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
+            }
+        } else {
+            quote! {
+                pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
             }
         }
+
     }
 
 
@@ -68,7 +99,7 @@ impl <'f> BuilderField<'f> {
 
         if self.is_option() {
             quote! {
-                let #ident = self.#ident.take().flatten();
+                let #ident = self.#ident.take();
             }
         } else {
             quote! {
