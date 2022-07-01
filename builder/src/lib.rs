@@ -46,7 +46,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let err_msg = format!("missing field '{}'", ident.as_ref().unwrap());
 
         quote! {
-            let #ident = self.#ident.ok_or(#err_msg)?;
+            let #ident = self.#ident.take().ok_or(#err_msg)?;
         }
     });
 
@@ -68,7 +68,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #builder_name {
             #(#builder_setters)*
 
-            pub fn build(self) -> core::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> core::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
                 #(#builder_build_body)*
                 Ok(#struct_name {
                     #(#field_names),*
