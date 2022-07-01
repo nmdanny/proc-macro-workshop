@@ -6,4 +6,13 @@
 // To run the code:
 //     $ cargo run
 
-fn main() {}
+use derive_builder::Builder;
+
+#[derive(Builder)]
+struct Foo {
+    a: u32,
+    b: u32
+}
+
+fn main() {
+}
