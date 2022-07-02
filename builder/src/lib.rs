@@ -132,7 +132,7 @@ impl<'f> BuilderField<'f> {
             FieldType::Regular => {
                 let ty = self.ty();
                 new_field.ty = parse_quote! {
-                    core::option::Option<#ty>
+                    std::option::Option<#ty>
                 };
                 new_field
             }
@@ -149,7 +149,7 @@ impl<'f> BuilderField<'f> {
         match &self.f_type {
             FieldType::Regular => quote! {
                 pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                    self.#ident = Some(#ident);
+                    self.#ident = std::option::Option::Some(#ident);
                     self
                 }
             },
@@ -208,8 +208,8 @@ impl<'f> BuilderField<'f> {
     fn to_init_body(&self) -> impl ToTokens {
         let ident = self.ident();
         match &self.f_type {
-            FieldType::Regular | FieldType::Optional(_) => quote! { #ident: None },
-            FieldType::Each { .. } => quote! { #ident: Vec::new() },
+            FieldType::Regular | FieldType::Optional(_) => quote! { #ident: std::option::Option::None },
+            FieldType::Each { .. } => quote! { #ident: std::vec::Vec::new() },
         }
     }
 }
@@ -258,7 +258,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #builder_name {
             #(#builder_setters)*
 
-            pub fn build(&mut self) -> core::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> std::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
                 #(#builder_build_bodies)*
                 Ok(#struct_name {
                     #(#field_names),*
