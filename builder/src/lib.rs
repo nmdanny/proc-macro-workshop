@@ -16,19 +16,27 @@ struct BuilderField<'f> {
     f_type: FieldType<'f>,
 }
 
-fn find_each_attribute(attrs: &[Attribute]) -> Option<String> {
+fn find_each_attribute(attrs: &[Attribute]) -> Option<syn::Result<String>> {
     let builder_attr = attrs.iter().find(|attr| attr.path.is_ident("builder"))?;
     let meta = builder_attr
         .parse_meta()
         .expect("Couldn't parse meta from attribute");
-    struct Visitor {
+    struct Visitor<'ast> {
         inside_each: bool,
-        each: Option<String>,
+        each: Option<syn::Result<String>>,
+        meta: &'ast Meta,
     }
-    impl<'ast> Visit<'ast> for Visitor {
+    impl<'ast> Visit<'ast> for Visitor<'ast> {
         fn visit_meta(&mut self, i: &'ast Meta) {
             self.inside_each = match i {
-                Meta::NameValue(MetaNameValue { path, .. }) => path.is_ident("each"),
+                Meta::NameValue(MetaNameValue { path, .. }) if path.is_ident("each") => true,
+                Meta::NameValue(_) => {
+                    self.each = Some(Err(syn::Error::new_spanned(
+                        self.meta,
+                        "expected `builder(each = \"...\")`",
+                    )));
+                    return;
+                }
                 _ => false,
             };
             syn::visit::visit_meta(self, i);
@@ -36,13 +44,14 @@ fn find_each_attribute(attrs: &[Attribute]) -> Option<String> {
 
         fn visit_lit_str(&mut self, i: &'ast syn::LitStr) {
             if self.inside_each {
-                self.each = Some(i.value());
+                self.each = Some(Ok(i.value()));
             }
         }
     }
     let mut visitor = Visitor {
         inside_each: false,
         each: None,
+        meta: &meta,
     };
     visitor.visit_meta(&meta);
     visitor.each
@@ -90,10 +99,11 @@ fn find_underlying<'ast>(ty: &'ast Type, outer_name: &'ast str) -> Option<&'ast 
 }
 
 impl<'f> BuilderField<'f> {
-    fn new(field: &'f Field) -> Self {
+    fn new(field: &'f Field) -> syn::Result<Self> {
         let ty = &field.ty;
         let mut f_type = FieldType::Regular;
         if let Some(each) = find_each_attribute(&field.attrs) {
+            let each = each?;
             let underlying =
                 find_underlying(ty, "Vec").expect("Type of an 'each' field must be Vec");
             f_type = FieldType::Each {
@@ -103,7 +113,7 @@ impl<'f> BuilderField<'f> {
         } else if let Some(underlying) = find_underlying(ty, "Option") {
             f_type = FieldType::Optional(underlying);
         }
-        BuilderField { field, f_type }
+        Ok(BuilderField { field, f_type })
     }
 
     fn ident(&self) -> &syn::Ident {
@@ -211,7 +221,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_name = format_ident!("{}Builder", input.ident);
 
     let fields = match &input.data {
-        Data::Struct(ref s) => s.fields.iter().map(BuilderField::new).collect::<Vec<_>>(),
+        Data::Struct(ref s) => {
+            let res = s
+                .fields
+                .iter()
+                .map(BuilderField::new)
+                .collect::<syn::Result<Vec<_>>>();
+            match res {
+                Ok(res) => res,
+                Err(err) => return err.to_compile_error().into(),
+            }
+        }
         _ => panic!("Expected struct"),
     };
 
