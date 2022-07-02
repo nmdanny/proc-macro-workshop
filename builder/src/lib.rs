@@ -1,12 +1,51 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse_macro_input, parse_quote, visit::Visit, AngleBracketedGenericArguments, Data,
-    DeriveInput, Field, GenericArgument, Ident, Path, Type, TypePath,
+    parse_macro_input, parse_quote, visit::Visit, Attribute, Data, DeriveInput, Field,
+    GenericArgument, Meta, MetaNameValue, Type, TypePath,
 };
+
+enum FieldType<'f> {
+    Regular,
+    Optional(&'f Type),
+    Each { field: String, underlying: &'f Type },
+}
 
 struct BuilderField<'f> {
     field: &'f Field,
+    f_type: FieldType<'f>,
+}
+
+fn find_each_attribute(attrs: &[Attribute]) -> Option<String> {
+    let builder_attr = attrs.iter().find(|attr| attr.path.is_ident("builder"))?;
+    let meta = builder_attr
+        .parse_meta()
+        .expect("Couldn't parse meta from attribute");
+    struct Visitor {
+        inside_each: bool,
+        each: Option<String>,
+    }
+    impl<'ast> Visit<'ast> for Visitor {
+        fn visit_meta(&mut self, i: &'ast Meta) {
+            self.inside_each = match i {
+                Meta::NameValue(MetaNameValue { path, .. }) => path.is_ident("each"),
+                _ => false,
+            };
+            syn::visit::visit_meta(self, i);
+        }
+
+        fn visit_lit_str(&mut self, i: &'ast syn::LitStr) {
+            if self.inside_each {
+                self.each = Some(i.value());
+            }
+        }
+    }
+    let mut visitor = Visitor {
+        inside_each: false,
+        each: None,
+    };
+    visitor.visit_meta(&meta);
+    visitor.each
 }
 
 fn find_underlying<'ast>(ty: &'ast Type, outer_name: &'ast str) -> Option<&'ast Type> {
@@ -52,7 +91,19 @@ fn find_underlying<'ast>(ty: &'ast Type, outer_name: &'ast str) -> Option<&'ast 
 
 impl<'f> BuilderField<'f> {
     fn new(field: &'f Field) -> Self {
-        BuilderField { field }
+        let ty = &field.ty;
+        let mut f_type = FieldType::Regular;
+        if let Some(each) = find_each_attribute(&field.attrs) {
+            let underlying =
+                find_underlying(ty, "Vec").expect("Type of an 'each' field must be Vec");
+            f_type = FieldType::Each {
+                field: each,
+                underlying,
+            }
+        } else if let Some(underlying) = find_underlying(ty, "Option") {
+            f_type = FieldType::Optional(underlying);
+        }
+        BuilderField { field, f_type }
     }
 
     fn ident(&self) -> &syn::Ident {
@@ -63,43 +114,65 @@ impl<'f> BuilderField<'f> {
         &self.field.ty
     }
 
-    fn is_option(&self) -> bool {
-        self.option_of().is_some()
-    }
-
-    fn option_of(&self) -> Option<&syn::Type> {
-        let ty = &self.field.ty;
-        find_underlying(ty, "Option")
-    }
-
     fn to_field(&self) -> Field {
         let mut new_field = self.field.clone();
-        if self.is_option() {
-            return new_field;
+        new_field.attrs.clear();
+        match self.f_type {
+            // For a regular field, wrap the type in an Option
+            FieldType::Regular => {
+                let ty = self.ty();
+                new_field.ty = parse_quote! {
+                    core::option::Option<#ty>
+                };
+                new_field
+            }
+
+            // Optional or each fields are already wrapped in an appropriate collection
+            _ => new_field,
         }
-        let ty = self.ty();
-        new_field.ty = parse_quote! {
-            core::option::Option<#ty>
-        };
-        new_field
     }
 
     fn to_setter(&self) -> impl ToTokens {
         let ident = self.ident();
         let ty = self.ty();
 
-        if let Some(underlying_ty) = self.option_of() {
-            quote! {
-                pub fn #ident(&mut self, #ident: #underlying_ty) -> &mut Self {
-                    self.#ident = Some(#ident);
-                    self
-                }
-            }
-        } else {
-            quote! {
+        match &self.f_type {
+            FieldType::Regular => quote! {
                 pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
                     self.#ident = Some(#ident);
                     self
+                }
+            },
+            FieldType::Optional(underlying) => quote! {
+                pub fn #ident(&mut self, #ident: #underlying) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
+            },
+            FieldType::Each { field, underlying } => {
+                let all_setter = quote! {
+                    pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                        self.#ident = #ident;
+                        self
+                    }
+                };
+                let each_setter_fn = format_ident!("{}", field);
+                let each_setter = quote! {
+                    pub fn #each_setter_fn(&mut self, #ident: #underlying) -> &mut Self {
+                        self.#ident.push(#ident);
+                        self
+                    }
+                };
+                if ident.to_string() != field.to_string() {
+                    eprintln!("Making both setters");
+                    quote! {
+                        #all_setter
+                        #each_setter
+                    }
+                } else {
+                    quote! {
+                        #each_setter
+                    }
                 }
             }
         }
@@ -109,24 +182,29 @@ impl<'f> BuilderField<'f> {
         let ident = self.ident();
         let err_msg = format!("missing field '{}'", ident);
 
-        if self.is_option() {
-            quote! {
-                let #ident = self.#ident.take();
-            }
-        } else {
-            quote! {
+        match &self.f_type {
+            FieldType::Regular => quote! {
                 let #ident = self.#ident.take().ok_or(#err_msg)?;
-            }
+            },
+            FieldType::Optional(_) => quote! {
+                let #ident = self.#ident.take();
+            },
+            FieldType::Each { .. } => quote! {
+                let #ident = self.#ident.drain(..).collect();
+            },
         }
     }
 
-    fn to_init_none(&self) -> impl ToTokens {
+    fn to_init_body(&self) -> impl ToTokens {
         let ident = self.ident();
-        quote! { #ident: None }
+        match &self.f_type {
+            FieldType::Regular | FieldType::Optional(_) => quote! { #ident: None },
+            FieldType::Each { .. } => quote! { #ident: Vec::new() },
+        }
     }
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -139,7 +217,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let builder_fields = fields.iter().map(BuilderField::to_field);
 
-    let builder_init_nones = fields.iter().map(BuilderField::to_init_none);
+    let builder_init_nones = fields.iter().map(BuilderField::to_init_body);
     let builder_setters = fields.iter().map(BuilderField::to_setter);
     let builder_build_bodies = fields.iter().map(BuilderField::to_build_body);
     let field_names = fields.iter().map(BuilderField::ident);
