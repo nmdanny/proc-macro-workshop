@@ -1,9 +1,11 @@
+
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
-use quote::{quote};
+use quote::quote;
 use syn::{
-    parse_macro_input, Data, DataStruct, DeriveInput, Field, Lit,
-    MetaNameValue,
+    parse_macro_input, parse_quote, Data, DataStruct, DeriveInput, Field, Generics, Lit,
+    MetaNameValue, TraitBound, TypeParamBound, Path, parse_quote_spanned,
+    spanned::Spanned
 };
 
 struct CustomDebugField<'ast> {
@@ -11,12 +13,22 @@ struct CustomDebugField<'ast> {
     format_string: Option<String>,
 }
 
+struct CustomDebugBuilder<'ast> {
+    fields: Vec<CustomDebugField<'ast>>,
+    ident: &'ast Ident,
+    data: &'ast Data,
+    generics: &'ast Generics,
+}
+
 impl<'ast> CustomDebugBuilder<'ast> {
     fn new(input: &'ast DeriveInput) -> syn::Result<Self> {
         let ident = &input.ident;
         let data = &input.data;
+        let generics = &input.generics;
         let mut builder = Self {
-            data, ident,
+            data,
+            ident,
+            generics,
             fields: Vec::new(),
         };
         if let Some(data_struct) = builder.as_struct() {
@@ -59,6 +71,28 @@ impl<'ast> CustomDebugBuilder<'ast> {
         }
     }
 
+    fn get_adjusted_generics(&self) -> Generics {
+        let mut generics = self.generics.clone();
+        for param in generics.type_params_mut() {
+            let has_debug = param
+                .bounds
+                .iter()
+                .find_map(|bound| match bound {
+                    TypeParamBound::Trait(t)
+                        if t.path.get_ident().map(|i| i.to_string()) == Some("Debug".into()) =>
+                    {
+                        Some(t)
+                    }
+                    _ => None,
+                })
+                .is_some();
+            if !has_debug {
+                param.bounds.push(parse_quote!(std::fmt::Debug));
+            }
+        }
+        generics
+    }
+
     fn build(self) -> syn::Result<proc_macro2::TokenStream> {
         let ident = self.ident;
         let ident_s = ident.to_string();
@@ -67,22 +101,27 @@ impl<'ast> CustomDebugBuilder<'ast> {
             Data::Enum(_) => todo!(),
             Data::Union(_) => todo!(),
         };
-        let fmt_fields = self.fields.iter()
-            .map(|field| {
-                let field_ident = field.field.ident.as_ref().expect("TODO fields without ident(tuple)");
-                let field_name = field_ident.to_string();
-                let debuggable = match &field.format_string {
-                    Some(fmt_string) => {
-                        quote! {
-                            &format_args!(#fmt_string, &self.#field_ident)
-                        }
+        let fmt_fields = self.fields.iter().map(|field| {
+            let field_ident = field
+                .field
+                .ident
+                .as_ref()
+                .expect("TODO fields without ident(tuple)");
+            let field_name = field_ident.to_string();
+            let debuggable = match &field.format_string {
+                Some(fmt_string) => {
+                    quote! {
+                        &format_args!(#fmt_string, &self.#field_ident)
                     }
-                    None => quote! { &self.#field_ident },
-                };
-                quote! { .field(#field_name, #debuggable)}
-            });
+                }
+                None => quote! { &self.#field_ident },
+            };
+            quote! { .field(#field_name, #debuggable)}
+        });
+        let generics = self.get_adjusted_generics();
+        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
         Ok(quote! {
-            impl std::fmt::Debug for #ident {
+            impl #impl_generics std::fmt::Debug for #ident #ty_generics #where_clause {
                 fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     #fmt_begin
                     #(#fmt_fields)*
@@ -93,15 +132,9 @@ impl<'ast> CustomDebugBuilder<'ast> {
     }
 }
 
-struct CustomDebugBuilder<'ast> {
-    fields: Vec<CustomDebugField<'ast>>,
-    ident: &'ast Ident,
-    data: &'ast Data,
-}
-
-impl <'ast> std::fmt::Debug for CustomDebugBuilder<'ast> {
+impl<'ast> std::fmt::Debug for CustomDebugBuilder<'ast> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f; 
+        let _ = f;
         todo!()
     }
 }
