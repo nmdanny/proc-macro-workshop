@@ -71,7 +71,15 @@ impl<'ast> CustomDebugBuilder<'ast> {
             .map(|field| {
                 let field_ident = field.field.ident.as_ref().expect("TODO fields without ident(tuple)");
                 let field_name = field_ident.to_string();
-                quote! { .field(#field_name, &self.#field_ident)}
+                let debuggable = match &field.format_string {
+                    Some(fmt_string) => {
+                        quote! {
+                            &format_args!(#fmt_string, &self.#field_ident)
+                        }
+                    }
+                    None => quote! { &self.#field_ident },
+                };
+                quote! { .field(#field_name, #debuggable)}
             });
         Ok(quote! {
             impl std::fmt::Debug for #ident {
@@ -93,7 +101,7 @@ struct CustomDebugBuilder<'ast> {
 
 impl <'ast> std::fmt::Debug for CustomDebugBuilder<'ast> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // f.debug_struct("namkeke").field("s", self.)
+        let _ = f; 
         todo!()
     }
 }
