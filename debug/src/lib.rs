@@ -1,11 +1,12 @@
+use std::collections::HashSet;
 
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use quote::quote;
 use syn::{
-    parse_macro_input, parse_quote, Data, DataStruct, DeriveInput, Field, Generics, Lit,
-    MetaNameValue, TraitBound, TypeParamBound, Path, parse_quote_spanned,
-    spanned::Spanned
+    parse_macro_input, parse_quote, visit::Visit, Data,
+    DataStruct, DeriveInput, Field, Generics, Lit, MetaNameValue,
+    TypeParam, TypeParamBound,
 };
 
 struct CustomDebugField<'ast> {
@@ -73,21 +74,19 @@ impl<'ast> CustomDebugBuilder<'ast> {
 
     fn get_adjusted_generics(&self) -> Generics {
         let mut generics = self.generics.clone();
+        let all_generic_idents = self
+            .generics
+            .type_params()
+            .map(|tp| tp.ident.to_string())
+            .collect();
+        let mut used_params = HashSet::<String>::new();
+        for field in &self.fields {
+            let field_params = non_phantom_generics(&all_generic_idents, &field.field.ty);
+            used_params.extend(field_params.into_iter());
+        }
         for param in generics.type_params_mut() {
-            let has_debug = param
-                .bounds
-                .iter()
-                .find_map(|bound| match bound {
-                    TypeParamBound::Trait(t)
-                        if t.path.get_ident().map(|i| i.to_string()) == Some("Debug".into()) =>
-                    {
-                        Some(t)
-                    }
-                    _ => None,
-                })
-                .is_some();
-            if !has_debug {
-                param.bounds.push(parse_quote!(std::fmt::Debug));
+            if used_params.contains(&param.ident.to_string()) {
+                ensure_has_debug(param);
             }
         }
         generics
@@ -132,6 +131,59 @@ impl<'ast> CustomDebugBuilder<'ast> {
     }
 }
 
+fn ensure_has_debug(param: &mut TypeParam) {
+    let has_debug = param
+        .bounds
+        .iter()
+        .find_map(|bound| match bound {
+            TypeParamBound::Trait(t)
+                if t.path.get_ident().map(|i| i.to_string()) == Some("Debug".into()) =>
+            {
+                Some(t)
+            }
+            _ => None,
+        })
+        .is_some();
+    if !has_debug {
+        param.bounds.push(parse_quote!(std::fmt::Debug));
+    }
+}
+
+fn non_phantom_generics<'ast>(
+    all_generics: &'ast HashSet<String>,
+    ty: &'ast syn::Type,
+) -> HashSet<String> {
+    struct Visitor<'ast> {
+        all_generics: &'ast HashSet<String>,
+        set: HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Visitor<'ast> {
+        fn visit_type_path(&mut self, i: &'ast syn::TypePath) {
+            let continue_visit = i
+                .path
+                .segments
+                .iter()
+                .find(|seg| seg.ident.to_string() == "PhantomData")
+                .is_none();
+            if let Some(ident) = i.path.get_ident() {
+                let ident = ident.to_string();
+                if self.all_generics.contains(&ident) {
+                    self.set.insert(ident);
+                }
+            }
+            if continue_visit {
+                syn::visit::visit_type_path(self, i);
+            }
+        }
+    }
+    let mut visitor = Visitor {
+        set: HashSet::new(),
+        all_generics,
+    };
+    visitor.visit_type(ty);
+    visitor.set
+}
+
 impl<'ast> std::fmt::Debug for CustomDebugBuilder<'ast> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let _ = f;
@@ -148,4 +200,27 @@ fn run_derive(input: DeriveInput) -> syn::Result<proc_macro::TokenStream> {
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     run_derive(input).unwrap_or_else(|syn_err| syn_err.to_compile_error().into())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_non_phantom_generics() {
+        let ty: syn::Type = parse_quote!(Foo<T, (X,Y, PhantomData<B>)>);
+        let all_generics = ["T", "X", "Y", "B"]
+            .into_iter()
+            .map(|s| s.to_owned())
+            .collect::<HashSet<_>>();
+        let ty_param_set = non_phantom_generics(&all_generics, &ty);
+        let ty_idents = ty_param_set
+            .iter()
+            .map(|ident| ident.to_string())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            ty_idents,
+            HashSet::from(["T", "X", "Y"].map(|s| s.to_owned()))
+        );
+    }
 }
